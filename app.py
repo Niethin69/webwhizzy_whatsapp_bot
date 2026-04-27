@@ -78,35 +78,8 @@ def empty():
     return Response(str(MessagingResponse()), mimetype="text/xml")
 
 def ask_claude(text, history):
-    if not ANTHROPIC_API_KEY: return None
-
-    # Fix: sanitize history to ensure strictly alternating user/assistant roles.
-    # Consecutive same-role messages cause a 400 Bad Request from the Anthropic API.
-    clean_history = []
-    for msg in history[-8:]:
-        if clean_history and clean_history[-1]["role"] == msg["role"]:
-            continue  # skip consecutive same-role messages
-        clean_history.append(msg)
-
-    # Ensure history doesn't end on a user turn (would create two consecutive user messages)
-    if clean_history and clean_history[-1]["role"] == "user":
-        clean_history = clean_history[:-1]
-
-    msgs = clean_history + [{"role": "user", "content": text}]
-    payload = json.dumps({"model":"claude-haiku-4-5-20251001","max_tokens":300,"system":SYSTEM_PROMPT,"messages":msgs}).encode()
-    req = urllib.request.Request("https://api.anthropic.com/v1/messages",data=payload,
-        headers={"Content-Type":"application/json","x-api-key":ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01"},method="POST")
-    try:
-        with urllib.request.urlopen(req,timeout=15) as r:
-            return json.loads(r.read())["content"][0]["text"].strip()
-    except urllib.error.HTTPError as e:
-        # Fix: log the full response body so the exact API error is visible in Railway logs
-        body = e.read().decode()
-        logger.error(f"Claude HTTP {e.code}: {body}")
-        return None
-    except Exception as e:
-        logger.error(f"Claude: {e}")
-        return None
+    # Claude AI disabled - no API credits. Re-enable by restoring API call here.
+    return None
 
 def kw_match(text):
     t=text.lower()
