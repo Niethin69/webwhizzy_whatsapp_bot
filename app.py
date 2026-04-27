@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """WebWhizzy WhatsApp Bot v1 - AI + Contact Form + Live Human Agent"""
 
-import os, json, re, urllib.request, logging
+import os, json, re, urllib.request, urllib.error, logging
 from flask import Flask, request, Response
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
@@ -9,7 +9,7 @@ from twilio.rest import Client
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_WHATSAPP    = os.getenv("TWILIO_WHATSAPP", "whatsapp:+14155238886")
+TWILIO_WHATSAPP    = os.getenv("TWILIO_WHATSAPP", "whatsapp:+15559547877")
 ADMIN_WHATSAPP     = os.getenv("ADMIN_WHATSAPP", "")
 
 app = Flask(__name__)
@@ -79,13 +79,34 @@ def empty():
 
 def ask_claude(text, history):
     if not ANTHROPIC_API_KEY: return None
-    msgs = history[-8:]+[{"role":"user","content":text}]
+
+    # Fix: sanitize history to ensure strictly alternating user/assistant roles.
+    # Consecutive same-role messages cause a 400 Bad Request from the Anthropic API.
+    clean_history = []
+    for msg in history[-8:]:
+        if clean_history and clean_history[-1]["role"] == msg["role"]:
+            continue  # skip consecutive same-role messages
+        clean_history.append(msg)
+
+    # Ensure history doesn't end on a user turn (would create two consecutive user messages)
+    if clean_history and clean_history[-1]["role"] == "user":
+        clean_history = clean_history[:-1]
+
+    msgs = clean_history + [{"role": "user", "content": text}]
     payload = json.dumps({"model":"claude-haiku-4-5-20251001","max_tokens":300,"system":SYSTEM_PROMPT,"messages":msgs}).encode()
     req = urllib.request.Request("https://api.anthropic.com/v1/messages",data=payload,
         headers={"Content-Type":"application/json","x-api-key":ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01"},method="POST")
     try:
-        with urllib.request.urlopen(req,timeout=15) as r: return json.loads(r.read())["content"][0]["text"].strip()
-    except Exception as e: logger.error(f"Claude: {e}"); return None
+        with urllib.request.urlopen(req,timeout=15) as r:
+            return json.loads(r.read())["content"][0]["text"].strip()
+    except urllib.error.HTTPError as e:
+        # Fix: log the full response body so the exact API error is visible in Railway logs
+        body = e.read().decode()
+        logger.error(f"Claude HTTP {e.code}: {body}")
+        return None
+    except Exception as e:
+        logger.error(f"Claude: {e}")
+        return None
 
 def kw_match(text):
     t=text.lower()
