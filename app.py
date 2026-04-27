@@ -9,7 +9,7 @@ from twilio.rest import Client
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_WHATSAPP    = os.getenv("TWILIO_WHATSAPP", "whatsapp:+15559547877")
+TWILIO_WHATSAPP    = os.getenv("TWILIO_WHATSAPP", "")
 ADMIN_WHATSAPP     = os.getenv("ADMIN_WHATSAPP", "")
 
 app = Flask(__name__)
