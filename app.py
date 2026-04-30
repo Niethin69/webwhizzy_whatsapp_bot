@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""WebWhizzy WhatsApp Bot v1 - AI + Contact Form + Live Human Agent"""
+"""WebWhizzy WhatsApp Bot v2 - Multi-admin support"""
 
-import os, json, re, urllib.request, urllib.error, logging
+import os, json, re, urllib.request, logging
 from flask import Flask, request, Response
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
@@ -9,8 +9,9 @@ from twilio.rest import Client
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_WHATSAPP    = os.getenv("TWILIO_WHATSAPP", "")
-ADMIN_WHATSAPP     = os.getenv("ADMIN_WHATSAPP", "")
+TWILIO_WHATSAPP    = os.getenv("TWILIO_WHATSAPP", "whatsapp:+14155238886")
+ADMIN_WHATSAPP     = os.getenv("ADMIN_WHATSAPP", "")   # primary e.g. whatsapp:+60167887469
+ADMIN_WHATSAPP_2   = os.getenv("ADMIN_WHATSAPP_2", "") # secondary e.g. whatsapp:+61489187569
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -23,12 +24,10 @@ sessions: dict = {}
 
 SYSTEM_PROMPT = """You are the WebWhizzy WhatsApp assistant. WebWhizzy builds AI-powered agents for SMS and Telegram.
 Use WhatsApp formatting (*bold*, emojis). Keep replies concise and friendly.
-
-SERVICES: SMS Agents + Telegram Agents. Both in Standard ($750 one-time) or Premium ($1,500 + $250/mo).
+SERVICES: SMS Agents + Telegram Agents. Standard $750 one-time. Premium $1,500 + $250/mo.
 Standard: template workflow, 1-week delivery, 30-day support.
 Premium: custom AI, advanced automation, Google Sheets logging, admin alerts, monthly updates, priority support.
 HOW IT WORKS: Discovery Call -> Design & Build -> Test & Refine -> Deploy & Monitor.
-
 Suggest CONTACT for quote form, HUMAN for live agent. Never make up info."""
 
 MENU = ("👋 *Welcome to WebWhizzy!*\n\nWe build AI agents for SMS & Telegram - 24/7 customer conversations.\n\n"
@@ -59,6 +58,16 @@ KW = {"price|cost|how much|pricing|plan|package":"pricing",
       "hi|hello|hey|start|menu|help":"greeting",
       "stop|unsubscribe|quit":"stop"}
 
+def get_admin_numbers():
+    """Return all admin plain numbers (without whatsapp: prefix)."""
+    admins = []
+    if ADMIN_WHATSAPP: admins.append(ADMIN_WHATSAPP.replace("whatsapp:","").strip())
+    if ADMIN_WHATSAPP_2: admins.append(ADMIN_WHATSAPP_2.replace("whatsapp:","").strip())
+    return admins
+
+def is_admin(phone):
+    return phone in get_admin_numbers()
+
 def get_sess(phone):
     if phone not in sessions:
         sessions[phone]={"state":IDLE,"contact":{},"history":[],"live_client":None}
@@ -70,6 +79,11 @@ def wa_out(to, body):
     try: twilio_client.messages.create(to=to_wa, from_=TWILIO_WHATSAPP, body=body[:4096])
     except Exception as e: logger.error(f"WA fail: {e}")
 
+def alert_admins(msg):
+    """Send alert to all admin numbers."""
+    for admin in get_admin_numbers():
+        wa_out(admin, msg)
+
 def twiml(text):
     r=MessagingResponse(); r.message(text[:4096])
     return Response(str(r), mimetype="text/xml")
@@ -78,8 +92,16 @@ def empty():
     return Response(str(MessagingResponse()), mimetype="text/xml")
 
 def ask_claude(text, history):
-    # Claude AI disabled - no API credits. Re-enable by restoring API call here.
-    return None
+    if not ANTHROPIC_API_KEY: return None
+    msgs=history[-8:]+[{"role":"user","content":text}]
+    payload=json.dumps({"model":"claude-haiku-4-5-20251001","max_tokens":300,
+        "system":SYSTEM_PROMPT,"messages":msgs}).encode()
+    req=urllib.request.Request("https://api.anthropic.com/v1/messages",data=payload,
+        headers={"Content-Type":"application/json","x-api-key":ANTHROPIC_API_KEY,
+                 "anthropic-version":"2023-06-01"},method="POST")
+    try:
+        with urllib.request.urlopen(req,timeout=15) as r: return json.loads(r.read())["content"][0]["text"].strip()
+    except Exception as e: logger.error(f"Claude: {e}"); return None
 
 def kw_match(text):
     t=text.lower()
@@ -93,12 +115,11 @@ def webhook():
     body=request.form.get("Body","").strip()
     if not from_raw or not body: return empty()
     from_num=from_raw.replace("whatsapp:","")
-    sess=get_sess(from_num)
-    cmd=body.upper().strip()
-    admin_plain=ADMIN_WHATSAPP.replace("whatsapp:","") if ADMIN_WHATSAPP else ""
+    sess=get_sess(from_num); cmd=body.upper().strip()
     logger.info(f"WA|{from_num[:9]}***|{sess['state']}|{body[:50]}")
 
-    if from_num==admin_plain:
+    # ── Admin commands (any registered admin number) ────────────────────────
+    if is_admin(from_num):
         if cmd.startswith("REPLYTO "):
             parts=body.strip().split(" ",2)
             if len(parts)>=3:
@@ -108,6 +129,7 @@ def webhook():
                 if cnum in sessions: sessions[cnum]["state"]=HUMAN_WAIT
                 return twiml(f"✅ Sent to {cnum}\nYou are in reply mode. Keep messaging.\nSend *DONE* to close.")
             return twiml("Usage: REPLYTO <number> <message>")
+
         if cmd.startswith("CLOSE "):
             parts=body.strip().split(" ",1)
             if len(parts)==2:
@@ -116,6 +138,7 @@ def webhook():
                 if cnum in sessions: sessions[cnum]["state"]=IDLE
                 sess["state"]=IDLE; sess["live_client"]=None
                 return twiml(f"✅ Session with {cnum} closed.")
+
         if cmd=="DONE":
             cnum=sess.get("live_client")
             if cnum:
@@ -123,14 +146,16 @@ def webhook():
                 if cnum in sessions: sessions[cnum]["state"]=IDLE
             sess["state"]=IDLE; sess["live_client"]=None
             return twiml("✅ Session closed.")
+
         if sess["state"]==ADMIN_REPLY:
             cnum=sess.get("live_client")
-            if cnum: wa_out(cnum,f"👤 *WebWhizzy Agent:*\n{body}"); return twiml("✅ Sent! Keep replying or send *DONE* to close.")
+            if cnum: wa_out(cnum,f"👤 *WebWhizzy Agent:*\n{body}"); return twiml("✅ Sent! Keep replying or DONE to close.")
             sess["state"]=IDLE; return twiml("No active session. Use REPLYTO <number> <message>.")
 
+    # ── Global commands ─────────────────────────────────────────────────────
     if cmd in("START","MENU","HELP","OPTIONS"): sess["state"]=IDLE; sess["history"]=[]; return twiml(MENU)
     if cmd in("STOP","UNSUBSCRIBE","QUIT"): sess["state"]=IDLE; return twiml("Unsubscribed. Message anytime 👋")
-    if cmd=="CANCEL": sess["state"]=IDLE; return twiml("No problem! Send *MENU* anytime or just ask me anything 😊")
+    if cmd=="CANCEL": sess["state"]=IDLE; return twiml("No problem! Send *MENU* anytime 😊")
 
     if cmd=="CONTACT":
         sess["state"]=FORM_FIRST; sess["contact"]={}
@@ -139,8 +164,7 @@ def webhook():
     if cmd=="HUMAN":
         sess["state"]=HUMAN_WAIT
         c=sess["contact"]; name=f"{c.get('first_name','')} {c.get('last_name','')}".strip() or "Someone"
-        if admin_plain:
-            wa_out(admin_plain,f"🔔 *Human agent request!*\n\n👤 *{name}*\n📱 {from_num}\n\n*Reply:* REPLYTO {from_num} your message\n*Close:* CLOSE {from_num}")
+        alert_admins(f"🔔 *Human agent request!*\n\n👤 *{name}*\n📱 {from_num}\n\n*Reply:* REPLYTO {from_num} your message\n*Close:* CLOSE {from_num}")
         return twiml("🙋 *Connecting you to our team!*\n\nAn agent has been notified and will join shortly.\n\nType your message now! 💬\n\n_(Type CANCEL to return to AI)_")
 
     if cmd in("SERVICES","SERVICE"): return twiml(FB["services"])
@@ -148,6 +172,7 @@ def webhook():
     if cmd in("HOW","HOWITWORKS"): return twiml(FB["how"])
     if cmd=="ABOUT": return twiml(FB["about"])
 
+    # ── State machine ───────────────────────────────────────────────────────
     state=sess["state"]
     if state==FORM_FIRST:
         sess["contact"]["first_name"]=body.strip(); sess["state"]=FORM_LAST
@@ -156,7 +181,7 @@ def webhook():
         sess["contact"]["last_name"]=body.strip(); sess["state"]=FORM_EMAIL
         return twiml("What is your *email address*? ✉️")
     if state==FORM_EMAIL:
-        if not re.match(r"[^@]+@[^@]+\.[^@]+",body.strip()): return twiml("That does not look right. Please double-check your email 🙏")
+        if not re.match(r"[^@]+@[^@]+\.[^@]+",body.strip()): return twiml("That does not look right. Please check your email 🙏")
         sess["contact"]["email"]=body.strip(); sess["state"]=FORM_BIZ
         return twiml("What is your *business name*? 🏢")
     if state==FORM_BIZ:
@@ -168,27 +193,23 @@ def webhook():
     if state==FORM_NOTE:
         note="" if body.upper().strip()=="SKIP" else body.strip()
         sess["contact"]["note"]=note
-        c=sess["contact"]
-        first,last=c.get("first_name",""),c.get("last_name","")
+        c=sess["contact"]; first,last=c.get("first_name",""),c.get("last_name","")
         email,biz,plan=c.get("email",""),c.get("business",""),c.get("plan","")
         confirm=(f"✅ *All done, {first}!*\n\n👤 *Name:* {first} {last}\n✉️ *Email:* {email}\n"
                  f"🏢 *Business:* {biz}\n📦 *Plan:* {plan}\n")
         if note: confirm+=f"💬 *Note:* {note}\n"
         confirm+="\nWe will be in touch within *24 hours*. 🚀"
-        sess["state"]=IDLE
-        logger.info(f"LEAD|{first} {last}|{email}|{biz}|{plan}|{from_num}")
-        if admin_plain:
-            amsg=f"🔔 *New Lead!*\n\n👤 {first} {last}\n✉️ {email}\n🏢 {biz}\n📦 {plan}\n"
-            if note: amsg+=f"💬 {note}\n"
-            amsg+=f"📱 {from_num}\n\n*Reply:* REPLYTO {from_num} your message"
-            wa_out(admin_plain,amsg)
+        sess["state"]=IDLE; logger.info(f"LEAD|{first} {last}|{email}|{biz}|{plan}|{from_num}")
+        amsg=(f"🔔 *New Lead!*\n\n👤 {first} {last}\n✉️ {email}\n🏢 {biz}\n📦 {plan}\n" +
+              (f"💬 {note}\n" if note else "") + f"📱 {from_num}\n\n*Reply:* REPLYTO {from_num} your message")
+        alert_admins(amsg)
         sess["contact"]={}; return twiml(confirm)
     if state==HUMAN_WAIT:
         c=sess["contact"]; name=f"{c.get('first_name','')} {c.get('last_name','')}".strip() or from_num
-        if admin_plain:
-            wa_out(admin_plain,f"📩 *Msg from {name}*\n📱 {from_num}\n\n_{body}_\n\n*Reply:* REPLYTO {from_num} your message\n*Close:* CLOSE {from_num}")
+        alert_admins(f"📩 *Msg from {name}*\n📱 {from_num}\n\n_{body}_\n\n*Reply:* REPLYTO {from_num} your message\n*Close:* CLOSE {from_num}")
         return twiml("📨 Message sent to our team! They will reply shortly 🙋")
 
+    # ── AI then keyword fallback ─────────────────────────────────────────────
     ai=ask_claude(body,sess["history"])
     if ai:
         sess["history"].append({"role":"user","content":body})
@@ -204,7 +225,7 @@ def webhook():
 @app.route("/",methods=["GET"])
 def health():
     active=sum(1 for s in sessions.values() if s["state"]!=IDLE)
-    return f"WebWhizzy WhatsApp Bot running | Active sessions: {active}", 200
+    return f"WebWhizzy WhatsApp Bot v2 running | Active sessions: {active}", 200
 
 if __name__=="__main__":
     port=int(os.getenv("PORT",5000))
